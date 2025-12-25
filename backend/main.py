@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel
 from fastapi.middleware.cors import CORSMiddleware
 import os
@@ -6,8 +6,13 @@ from qdrant_client import QdrantClient
 from qdrant_client.http import models as rest
 import json
 import uuid
+import logging
 
-# Initialize Qdrant (In-Memory for now, can be moved to Cloud)
+# Setup Logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("avatar-backend")
+
+# Initialize Qdrant
 qdrant = QdrantClient(":memory:")
 
 # Initialize Collection for RAG
@@ -15,24 +20,24 @@ COLLECTION_NAME = "growth_architect_knowledge"
 if not qdrant.collection_exists(COLLECTION_NAME):
     qdrant.create_collection(
         collection_name=COLLECTION_NAME,
-        vectors_config=rest.VectorParams(size=768, distance=rest.Distance.COSINE), # Gemini Embedding size
+        vectors_config=rest.VectorParams(size=768, distance=rest.Distance.COSINE),
     )
 
-# Mock RAG Data (Ideally seeded from your agency's docs)
-def seed_knowledge():
-    # In a real app, you'd embed these and upload to Qdrant
-    pass
-
-# Initialize Gemini
-import google.generativeai as genai
+# Initialize Gemini (using new google-genai SDK)
+from google import genai
+from google.genai import types
 
 # Load environment variables
 from dotenv import load_dotenv
 load_dotenv()
 
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+client = None
 if GEMINI_API_KEY:
-    genai.configure(api_key=GEMINI_API_KEY)
+    client = genai.Client(api_key=GEMINI_API_KEY)
+    logger.info("Gemini Client Initialized")
+else:
+    logger.warning("GEMINI_API_KEY not found in environment")
 
 # Initialize App
 app = FastAPI(title="3D Avatar AI Backend")
@@ -40,14 +45,13 @@ app = FastAPI(title="3D Avatar AI Backend")
 # CORS (Allow Frontend to connect)
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"], # In production, set to specific frontend URL
+    allow_origins=["*"],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
 )
 
 # Layers 1 & 2: In-Memory Session & Context Store
-# In production, use Redis or a Database
 sessions = {}
 
 class ThreadRequest(BaseModel):
@@ -63,8 +67,8 @@ class ThreadResponse(BaseModel):
 def get_or_create_session(session_id: str):
     if session_id not in sessions:
         sessions[session_id] = {
-            "history": [], # Layer 1: Short-term (last 10 msgs)
-            "facts": {     # Layer 2: Structured Context
+            "history": [], 
+            "facts": {
                 "location": "Unknown",
                 "business_type": "Unknown",
                 "pain_point": "Unknown",
@@ -74,9 +78,8 @@ def get_or_create_session(session_id: str):
     return sessions[session_id]
 
 async def extract_facts(user_msg: str, current_facts: dict):
-    """
-    Uses Gemini to update the structured facts from the latest message.
-    """
+    if not client: return current_facts
+    
     extraction_prompt = f"""
     Update the following business context JSON based on the user's latest message. 
     Only change values if new information is provided. Return ONLY the JSON.
@@ -84,26 +87,33 @@ async def extract_facts(user_msg: str, current_facts: dict):
     User Message: "{user_msg}"
     """
     
-    # Try models for extraction
-    for model_name in ['gemini-2.0-flash', 'gemini-1.5-flash', 'gemini-1.5-flash-latest']:
+    for model_name in ['gemini-2.0-flash', 'gemini-1.5-flash']:
         try:
-            model = genai.GenerativeModel(model_name)
-            response = model.generate_content(extraction_prompt, generation_config={"response_mime_type": "application/json"})
+            response = client.models.generate_content(
+                model=model_name,
+                contents=extraction_prompt,
+                config=types.GenerateContentConfig(response_mime_type='application/json')
+            )
             return json.loads(response.text.strip())
         except Exception as e:
-            print(f"Extraction failed for {model_name}: {e}")
+            logger.error(f"Extraction failed for {model_name}: {e}")
             continue
     return current_facts
 
 @app.get("/")
 def health_check():
-    status = "connected" if GEMINI_API_KEY else "missing_api_key"
+    status = "connected" if client else "missing_api_key"
     return {"status": "ok", "service": "avatar-backend", "llm_status": status}
 
 @app.post("/chat", response_model=ThreadResponse)
-async def chat_endpoint(request: ThreadRequest):
+async def chat_endpoint(request: ThreadRequest, raw_request: Request):
     user_msg = request.message
     session_id = request.session_id
+    
+    logger.info(f"Received chat request: session={session_id}, msg={user_msg}")
+    
+    # Log headers for debugging CORS/Networking
+    logger.info(f"Request Headers: {raw_request.headers}")
     
     # 1. Get Session & Update Info
     session = get_or_create_session(session_id)
@@ -113,7 +123,7 @@ async def chat_endpoint(request: ThreadRequest):
     session["history"].append({"role": "user", "content": user_msg})
     if len(session["history"]) > 10: session["history"].pop(0)
 
-    if not GEMINI_API_KEY:
+    if not client:
         return {
             "text": "Neural link inactive. Provide API key.",
             "intent": "error",
@@ -133,13 +143,7 @@ Known Facts about User: {json.dumps(session["facts"])}
 {json.dumps(session["history"][-5:])}
 
 ### YOUR OBJECTIVE
-Diagnose business bottlenecks. Pitch Pillar solutions (Infrastructure, Workforce, Engine, Ecosystem).
-Close for a Strategy Call/Audit if interest is shown.
-
-### CONVERSATION RULES
-- Be concise (1-3 punchy sentences).
-- Mention 'unfair advantage' over local competitors.
-- Ask clarifying questions to fill the 'Gap' (Traffic? Conversion? Operations?).
+Diagnose business bottlenecks. Build Strategy. Close for audit.
 
 ### OUTPUT FORMAT (JSON ONLY)
 {{
@@ -149,50 +153,28 @@ Close for a Strategy Call/Audit if interest is shown.
 }}
 """
         response_text = None
-        models_to_try = [
-            'gemini-flash-latest',
-            'gemini-1.5-flash',
-            'gemini-2.0-flash',
-            'gemini-pro-latest'
-        ]
-
-        for model_name in models_to_try:
+        for model_name in ['gemini-2.0-flash', 'gemini-1.5-flash']:
             try:
-                print(f"Trying chat model: {model_name}")
-                model = genai.GenerativeModel(model_name)
-                try:
-                    # Try with JSON mode
-                    response = model.generate_content(system_prompt, generation_config={"response_mime_type": "application/json"})
-                    response_text = response.text.strip()
-                except Exception as json_err:
-                    print(f"JSON mode failed for {model_name}, trying plain text: {json_err}")
-                    # Try without JSON mode
-                    response = model.generate_content(system_prompt)
-                    response_text = response.text.strip()
-                
-                if response_text:
-                    break
+                logger.info(f"Trying chat model: {model_name}")
+                response = client.models.generate_content(
+                    model=model_name,
+                    contents=system_prompt,
+                    config=types.GenerateContentConfig(response_mime_type='application/json')
+                )
+                response_text = response.text.strip()
+                if response_text: break
             except Exception as e:
-                print(f"Chat model {model_name} failed: {e}")
+                logger.error(f"Chat model {model_name} failed: {e}")
                 continue
 
         if not response_text:
             raise Exception("All models exhausted or rate limited.")
 
-        # Try to parse JSON from text
         try:
-            # simple cleanup
-            clean_text = response_text
-            if clean_text.startswith("```json"):
-                clean_text = clean_text[7:]
-            if clean_text.endswith("```"):
-                clean_text = clean_text[:-3]
-            response_data = json.loads(clean_text)
+            response_data = json.loads(response_text)
         except:
-             # Fallback if model didn't output JSON
             response_data = {"text": response_text, "intent": "chat", "emotion": "neutral"}
         
-        # Add Assistant to history
         session["history"].append({"role": "assistant", "content": response_data.get("text", "")})
         
         return {
@@ -203,21 +185,12 @@ Close for a Strategy Call/Audit if interest is shown.
         }
         
     except Exception as e:
-        print(f"Chat Error: {e}")
+        logger.error(f"Final Chat Error: {e}")
         return {
             "text": "Neural interference detected. Retrying diagnostic...",
             "intent": "error",
             "emotion": "confused"
         }
-
-@app.post("/tts")
-async def tts_endpoint(text: str):
-    """
-    Placeholder for Text-to-Speech generation.
-    Should return an audio blob or URL.
-    """
-    # TODO: Integrate ElevenLabs or OpenAI TTS
-    return {"status": "not_implemented_yet", "message": "TTS integration required"}
 
 if __name__ == "__main__":
     import uvicorn
