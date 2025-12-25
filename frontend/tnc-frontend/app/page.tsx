@@ -12,9 +12,9 @@ export default function Home() {
     "@context": "https://schema.org",
     "@type": "ProfessionalService",
     "name": "Total Nonstop Creativity",
-    "image": "https://totalnonstopcreativity.com/og-image.png",
+    "image": "https://tnc-agency.vercel.app/og-image.png",
     "description": "Autonomous growth ecosystems, AI sales agents, and high-performance development agency.",
-    "url": "https://totalnonstopcreativity.com",
+    url: "https://tnc-agency.vercel.app",
     "address": {
       "@type": "PostalAddress",
       "addressLocality": "Global",

@@ -130,7 +130,7 @@ export const metadata: Metadata = {
   openGraph: {
     title: "Total Nonstop Creativity | Autonomous Growth Ecosystems & AI Agency",
     description: "Scale your business with AI-powered automation and elite web development. Stop guessing, start dominating.",
-    url: "https://totalnonstopcreativity.vercel.app",
+    url: "https://tnc-agency.vercel.app",
     siteName: "Total Nonstop Creativity",
     images: [
       {
