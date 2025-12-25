@@ -44,6 +44,7 @@ export default function AvatarInterface() {
         setState("THINKING")
 
         const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://classical-tybie-rag-chatbot-44e67076.koyeb.app";
+        console.log("Connecting to API:", `${API_URL}/chat`);
 
         try {
             const response = await fetch(`${API_URL}/chat`, {
@@ -55,7 +56,13 @@ export default function AvatarInterface() {
                 })
             })
 
-            if (!response.ok) throw new Error("Backend connection failed")
+            console.log("API Response Status:", response.status);
+
+            if (!response.ok) {
+                const errorData = await response.text();
+                console.error("Backend Error Body:", errorData);
+                throw new Error(`Backend connection failed: ${response.status}`);
+            }
 
             const data = await response.json()
             const aiResponseText = data.text
