@@ -23,21 +23,31 @@ if not qdrant.collection_exists(COLLECTION_NAME):
         vectors_config=rest.VectorParams(size=768, distance=rest.Distance.COSINE),
     )
 
-# Initialize Gemini (using new google-genai SDK)
-from google import genai
-from google.genai import types
+# Initialize OpenRouter (using OpenAI SDK)
+from openai import OpenAI
 
 # Load environment variables
 from dotenv import load_dotenv
 load_dotenv()
 
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+OPENROUTER_API_KEY = os.getenv("OPENROUTER_API_KEY")
 client = None
-if GEMINI_API_KEY:
-    client = genai.Client(api_key=GEMINI_API_KEY)
-    logger.info("Gemini Client Initialized")
+if OPENROUTER_API_KEY:
+    client = OpenAI(
+        base_url="https://openrouter.ai/api/v1",
+        api_key=OPENROUTER_API_KEY,
+    )
+    logger.info("OpenRouter Client Initialized")
 else:
-    logger.warning("GEMINI_API_KEY not found in environment")
+    logger.warning("OPENROUTER_API_KEY not found in environment")
+
+# Free models to try in order (fallback on rate limits)
+FREE_MODELS = [
+    "google/gemini-2.0-flash-exp:free",
+    "nvidia/nemotron-nano-12b-v2-vl:free",
+    "mistralai/devstral-2512:free",
+    "kwaipilot/kat-coder-pro:free",
+]
 
 # Initialize App
 app = FastAPI(title="3D Avatar AI Backend")
@@ -87,17 +97,27 @@ async def extract_facts(user_msg: str, current_facts: dict):
     User Message: "{user_msg}"
     """
     
-    for model_name in ['gemini-2.0-flash', 'gemini-1.5-flash']:
+    # Try multiple free models with fallback
+    for model_name in FREE_MODELS:
         try:
-            response = client.models.generate_content(
+            logger.info(f"Extraction trying model: {model_name}")
+            response = client.chat.completions.create(
                 model=model_name,
-                contents=extraction_prompt,
-                config=types.GenerateContentConfig(response_mime_type='application/json')
+                messages=[
+                    {"role": "system", "content": "You are a JSON extraction assistant. Return only valid JSON."},
+                    {"role": "user", "content": extraction_prompt}
+                ],
+                response_format={"type": "json_object"},
+                timeout=10.0
             )
-            return json.loads(response.text.strip())
+            result = json.loads(response.choices[0].message.content)
+            logger.info(f"✓ Extraction successful with {model_name}")
+            return result
         except Exception as e:
-            logger.error(f"Extraction failed for {model_name}: {e}")
+            logger.warning(f"✗ Extraction failed for {model_name}: {str(e)[:100]}")
             continue
+    
+    logger.error("All models failed for extraction")
     return current_facts
 
 @app.get("/")
@@ -152,23 +172,32 @@ Diagnose business bottlenecks. Build Strategy. Close for audit.
   "emotion": "neutral" | "happy"| "confident" | "thinking"
 }}
 """
+        # Try multiple free models with fallback
         response_text = None
-        for model_name in ['gemini-2.0-flash', 'gemini-1.5-flash']:
+        successful_model = None
+        
+        for model_name in FREE_MODELS:
             try:
                 logger.info(f"Trying chat model: {model_name}")
-                response = client.models.generate_content(
+                response = client.chat.completions.create(
                     model=model_name,
-                    contents=system_prompt,
-                    config=types.GenerateContentConfig(response_mime_type='application/json')
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_msg}
+                    ],
+                    response_format={"type": "json_object"},
+                    timeout=15.0
                 )
-                response_text = response.text.strip()
-                if response_text: break
+                response_text = response.choices[0].message.content
+                successful_model = model_name
+                logger.info(f"✓ Chat successful with {model_name}")
+                break
             except Exception as e:
-                logger.error(f"Chat model {model_name} failed: {e}")
+                logger.warning(f"✗ Chat failed for {model_name}: {str(e)[:100]}")
                 continue
 
         if not response_text:
-            raise Exception("All models exhausted or rate limited.")
+            raise Exception("All models exhausted or rate-limited")
 
         try:
             response_data = json.loads(response_text)

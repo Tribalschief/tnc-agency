@@ -43,7 +43,7 @@ export default function AvatarInterface() {
     const processResponse = async (userText: string) => {
         setState("THINKING")
 
-        const API_URL = process.env.NEXT_PUBLIC_API_URL || "https://classical-tybie-rag-chatbot-44e67076.koyeb.app";
+        const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
         console.log("Connecting to API:", `${API_URL}/chat`);
 
         try {
